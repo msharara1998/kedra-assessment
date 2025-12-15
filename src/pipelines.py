@@ -16,7 +16,7 @@ from scrapy.exceptions import DropItem
 from src.models import RecordMetadata
 from src.storage import MongoDBStorage, MinIOStorage, FileDownloader, HTMLScraper
 from src.config import mongodb_settings, minio_settings
-from extraction import WRCSpider
+from src.extraction import WRCSpider
 
 logger = logging.getLogger(__name__)
 

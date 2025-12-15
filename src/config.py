@@ -109,6 +109,10 @@ class WRCSettings(BaseSettings):
         default="",
         validation_alias="WRC_BODY_MAPPING_JSON",
     )
+    allowed_domains: str = Field(
+        default="",
+        validation_alias="ALLOWED_DOMAINS"
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -116,6 +120,18 @@ class WRCSettings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    def get_allowed_domains(self) -> List[str]:
+        """Return the list of allowed domains for scraping."""
+        default_domains = ["workplacerelations.ie"]
+        if self.allowed_domains:
+            try:
+                parsed = json.loads(self.allowed_domains)
+                if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+                    return parsed
+            except Exception:
+                pass
+        return default_domains
 
     def get_bodies(self) -> List[str]:
         """Return the list of WRC bodies to scrape."""

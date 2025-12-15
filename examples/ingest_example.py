@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from scrapy.crawler import CrawlerProcess
 
 from src.config import scrapy_settings
-from extraction import WRCSpider
+from src.extraction import WRCSpider
 
 # Load environment variables
 load_dotenv()
@@ -29,9 +29,9 @@ def main() -> None:
     """Run ingestion example."""
     # Define parameters
     start_date = "2024-01-01"
-    end_date = "2024-01-31"
+    end_date = "2024-03-31"
     bodies = ["WRC"]  # Can include: WRC, LC, EAT, ET
-    output_file = "example_results.json"
+    output_file = "examples/example_results.json"
 
     logger.info("Starting ingestion example")
     logger.info("Date range: %s to %s", start_date, end_date)

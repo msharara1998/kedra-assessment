@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class WRCSpider(scrapy.Spider):
-    """Scrapy spider for Workplace Relations Commission."""
+    """Scrapy spider for Workplace Relations Commission Website"""
 
     name = "wrc_spider"
     allowed_domains = ["workplacerelations.ie"]
@@ -163,10 +163,8 @@ class WRCSpider(scrapy.Spider):
                 continue
 
         # Handle pagination - look for next page link
-        pagination = soup.find("a", text="»")
-        if not pagination:
-            # Try finding by URL pattern
-            pagination = soup.find("a", href=lambda h: h and "pageNumber=" in h and int(h.split("pageNumber=")[1].split("&")[0]) > 1)
+        # The » link has whitespace, so we need to check if '»' is in the text
+        pagination = soup.find("a", string=lambda t: t and "»" in t)
 
         if pagination and pagination.get("href"):
             next_url = response.urljoin(pagination["href"])
