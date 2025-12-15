@@ -2,7 +2,7 @@
 - Scrapy-based pipeline to ingest Workplace Relations decisions by body and monthly partitions, store metadata in MongoDB and raw files in MinIO (Landing Zone), then transform HTML to extract relevant content, rename files to identifier-based names, rehash, and persist to a Transformed Zone.
 
 **Quick Start**
-- Prerequisites: Docker, Docker Compose, Python 3.11+, Linux.
+- Prerequisites: Docker, Docker Compose, Python 3.11+, Linux/Windows.
 - Bring up infra:
 
 ```
@@ -13,25 +13,29 @@ docker compose up -d
 
 ```
 python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# Linux/Mac
 source .venv/bin/activate
+
 pip install -r requirements.txt
 ```
 
-- Run ingestion process:
+- Run ingestion process (Scraping):
 
 ```bash
 # Ingest WRC decisions for a specific period
-python -m src.ingest --start-date 2024-01-01 --end-date 2024-03-31 --bodies WRC --output results.json
+python src/main.py ingest --start-date 2024-01-01 --end-date 2024-03-31 --bodies WRC --output results.json
 
 # Ingest multiple bodies
-python -m src.ingest --start-date 2024-01-01 --end-date 2024-12-31 --bodies WRC,LC,EAT,ET
+python src/main.py ingest --start-date 2024-01-01 --end-date 2024-12-31 --bodies WRC,LC,EAT,ET
 ```
 
-- Run transformation over the same range:
+- Run transformation process:
 
 ```bash
 # Run transformation to process landing zone data
-python examples/run_transformation.py
+python src/main.py transform --start-date 2024-01-01 --end-date 2024-03-31
 ```
 
 **Architecture**
@@ -62,7 +66,7 @@ pytest -q
 
 The ingestion pipeline consists of:
 
-1. **WRCSpider** ([src/extract.py](src/extract.py)): Scrapy spider that:
+1. **WRCSpider** ([src/extraction.py](src/extraction.py)): Scrapy spider that:
    - Scrapes workplace relations decisions from workplacerelations.ie
    - Partitions date ranges into monthly intervals
    - Handles pagination automatically
@@ -88,24 +92,17 @@ The ingestion pipeline consists of:
 
 ```bash
 # Basic usage
-python -m src.ingest \
+python src/main.py ingest \
   --start-date 2024-01-01 \
   --end-date 2024-03-31 \
   --bodies WRC
 
 # Multiple bodies with JSON output
-python -m src.ingest \
+python src/main.py ingest \
   --start-date 2024-01-01 \
   --end-date 2024-12-31 \
   --bodies WRC,LC,EAT,ET \
   --output results.json
-
-# With debug logging
-python -m src.ingest \
-  --start-date 2024-06-01 \
-  --end-date 2024-06-30 \
-  --bodies WRC \
-  --log-level DEBUG
 ```
 
 **How It Works**
