@@ -451,7 +451,7 @@ class TransformationPipeline:
         records = self.source_db.find_by_date_range(
             start_date=start_date,
             end_date=end_date,
-            status="transformed",
+            status="extracted",
         )
         
         stats["total"] = len(records)
@@ -532,8 +532,11 @@ class TransformationPipeline:
         assert isinstance(mime_type, str)
         
         try:
+            # Extract object name from file_path (format: bucket/object_name)
+            object_name = file_path.split("/", 1)[1] if "/" in file_path else file_path
+            
             # Download file from source bucket
-            file_data = self.source_storage.download_file(file_path)
+            file_data = self.source_storage.download_file(object_name)
             
             # Process file based on type
             processed_data, new_hash, new_filename = self.file_processor.process_file(
@@ -552,11 +555,11 @@ class TransformationPipeline:
             # Create new metadata record
             processed_record = {
                 **record,  # Copy all original fields
-                "file_path": new_filename,
+                "file_path": new_file_path,
                 "file_hash": new_hash,
                 "updated_at": datetime.now().isoformat(),
                 "transformation_date": datetime.now().isoformat(),
-                "status": "processed",
+                "status": "transformed",
             }
             
             # Remove MongoDB _id field if present

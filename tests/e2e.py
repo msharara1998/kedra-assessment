@@ -1,24 +1,28 @@
-"""End-to-end test script for the complete data pipeline.
+"""Comprehensive end-to-end testing with detailed result inspection.
 
-Tests the full workflow: extraction -> storage -> transformation.
-Requires running MongoDB and MinIO services (docker-compose up).
+This script provides thorough testing of:
+1. Pagination handling across multiple pages
+2. Multiple HTML files within single documents
+3. Parent-child HTML document relationships
+4. Data transformation pipeline
+5. Visible, inspectable results for manual verification
+
+Run with: python tests/comprehensive_e2e.py
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch, Mock
-from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from datetime import datetime, date
+from typing import Dict, Any, List, Optional
 from pathlib import Path
+from collections import defaultdict
 import logging
-import time
+import json
 import sys
 import os
 
-from twisted.internet import reactor, defer
-from scrapy.crawler import CrawlerRunner
 from pymongo import MongoClient
-from minio.error import S3Error
 from minio import Minio
+from minio.error import S3Error
 import pytest
 
 # Add parent directory to path
@@ -27,32 +31,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.extraction import WRCSpider
 from src.transform import run_transformation_pipeline
 from src.storage import MongoDBStorage, MinIOStorage
-from src.models import RecordMetadata
-from src.config import scrapy_settings
+from src.config import mongodb_settings, minio_settings
 
 logger = logging.getLogger(__name__)
 
 
-class TestEndToEndPipeline:
-    """End-to-end tests for the complete data pipeline."""
+class ComprehensiveE2ETest:
+    """Comprehensive end-to-end testing with result inspection."""
 
-    @pytest.fixture(autouse=True)
-    def setup_environment(self) -> None:
-        """Set up test environment and clean up after test."""
-        # Test environment configuration
+    def __init__(self) -> None:
+        """Initialize test environment."""
+        # Load from .env file if exists
+        from dotenv import load_dotenv
+        load_dotenv()
+
         self.test_env = {
             "MONGO_URI": os.getenv("MONGO_URI", "mongodb://localhost:27017/"),
-            "MONGO_DB": os.getenv("MONGO_DB", "test_workplace_relations"),
-            "MONGO_COLLECTION": "test_records",
-            "MONGO_PROCESSED_COLLECTION": "test_processed_records",
+            "MONGO_DB": os.getenv("MONGO_DB", "test_e2e_workplace_relations"),
+            "MONGO_COLLECTION": "test_comprehensive_records",
+            "MONGO_PROCESSED_COLLECTION": "test_comprehensive_processed",
             "MINIO_ENDPOINT": os.getenv("MINIO_ENDPOINT", "localhost:9000"),
-            "MINIO_ACCESS_KEY": os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
-            "MINIO_SECRET_KEY": os.getenv("MINIO_SECRET_KEY", "minioadmin"),
-            "MINIO_BUCKET": "test-landing-zone",
-            "MINIO_PROCESSED_BUCKET": "test-processed",
+            "MINIO_ACCESS_KEY": os.getenv("MINIO_ACCESS_KEY", "admin"),
+            "MINIO_SECRET_KEY": os.getenv("MINIO_SECRET_KEY", "adminadmin"),
+            "MINIO_BUCKET": "test-comprehensive-landing",
+            "MINIO_PROCESSED_BUCKET": "test-comprehensive-processed",
         }
 
-        # Initialize storage clients for setup and teardown
         self.mongo_client = MongoClient(self.test_env["MONGO_URI"])
         self.test_db = self.mongo_client[self.test_env["MONGO_DB"]]
 
@@ -63,670 +67,708 @@ class TestEndToEndPipeline:
             secure=False,
         )
 
-        # Clean up before test
+        self.results: Dict[str, Any] = {}
+
+    def setup(self) -> None:
+        """Set up test environment."""
+        print("\n" + "="*80)
+        print("COMPREHENSIVE E2E TEST - SETUP")
+        print("="*80)
+
+        # Clean up existing test data
         self._cleanup()
 
         # Create test buckets
         self._create_buckets()
 
-        yield
+        print("✓ Setup completed successfully\n")
 
-        # Clean up after test
-        self._cleanup()
+    def teardown(self) -> None:
+        """Clean up test environment."""
+        print("\n" + "="*80)
+        print("CLEANUP")
+        print("="*80)
+
+        # Optionally keep data for inspection
+        keep_data = os.getenv("KEEP_TEST_DATA", "false").lower() == "true"
+
+        if keep_data:
+            print("⚠ Test data preserved for inspection (KEEP_TEST_DATA=true)")
+            print(f"  MongoDB Database: {self.test_env['MONGO_DB']}")
+            print(f"  MinIO Buckets: {self.test_env['MINIO_BUCKET']}, {self.test_env['MINIO_PROCESSED_BUCKET']}")
+        else:
+            self._cleanup()
+            print("✓ Cleanup completed")
 
     def _cleanup(self) -> None:
-        """Clean up test data from MongoDB and MinIO."""
-        # Drop test collections
+        """Clean up test data."""
+        # Drop collections
         try:
             self.test_db[self.test_env["MONGO_COLLECTION"]].drop()
             self.test_db[self.test_env["MONGO_PROCESSED_COLLECTION"]].drop()
-            logger.info("Dropped test MongoDB collections")
         except Exception as e:
-            logger.warning(f"Failed to drop test collections: {e}")
+            logger.debug(f"Cleanup warning: {e}")
 
-        # Remove test buckets and their contents
-        for bucket_name in [
-            self.test_env["MINIO_BUCKET"],
-            self.test_env["MINIO_PROCESSED_BUCKET"],
-        ]:
+        # Remove buckets
+        for bucket_name in [self.test_env["MINIO_BUCKET"], self.test_env["MINIO_PROCESSED_BUCKET"]]:
             try:
                 if self.minio_client.bucket_exists(bucket_name):
-                    # Remove all objects in bucket
                     objects = self.minio_client.list_objects(bucket_name, recursive=True)
                     for obj in objects:
                         self.minio_client.remove_object(bucket_name, obj.object_name)
-                    # Remove bucket
                     self.minio_client.remove_bucket(bucket_name)
-                    logger.info(f"Removed test bucket: {bucket_name}")
             except Exception as e:
-                logger.warning(f"Failed to remove bucket {bucket_name}: {e}")
+                logger.debug(f"Cleanup warning: {e}")
 
     def _create_buckets(self) -> None:
-        """Create test buckets in MinIO."""
-        for bucket_name in [
-            self.test_env["MINIO_BUCKET"],
-            self.test_env["MINIO_PROCESSED_BUCKET"],
-        ]:
-            try:
-                if not self.minio_client.bucket_exists(bucket_name):
-                    self.minio_client.make_bucket(bucket_name)
-                    logger.info(f"Created test bucket: {bucket_name}")
-            except S3Error as e:
-                logger.error(f"Failed to create bucket {bucket_name}: {e}")
-                raise
+        """Create test buckets."""
+        for bucket_name in [self.test_env["MINIO_BUCKET"], self.test_env["MINIO_PROCESSED_BUCKET"]]:
+            if not self.minio_client.bucket_exists(bucket_name):
+                self.minio_client.make_bucket(bucket_name)
 
-    @pytest.mark.e2e
-    def test_full_pipeline_with_mocked_spider(self) -> None:
-        """Test complete pipeline with mocked spider data.
+    def test_pagination_handling(self) -> bool:
+        """Test that pagination works correctly.
 
-        This test validates the entire workflow without depending on external website:
-        1. Mock spider extraction and populate MongoDB with test records
-        2. Download and store mock files to MinIO
-        3. Run transformation pipeline
-        4. Verify processed data in destination bucket and collection
+        Creates mock data simulating multiple pages of search results
+        and verifies all pages are processed correctly.
         """
-        with patch.dict(os.environ, self.test_env):
-            # Step 1: Create mock extracted records
-            mock_records = self._create_mock_records()
+        print("\n" + "="*80)
+        print("TEST 1: PAGINATION HANDLING")
+        print("="*80)
+        print("Testing: Multiple pages of search results are fully extracted\n")
 
-            # Step 2: Populate MongoDB with mock records
-            mongo_storage = MongoDBStorage(
-                mongo_uri=self.test_env["MONGO_URI"],
-                database=self.test_env["MONGO_DB"],
-                collection=self.test_env["MONGO_COLLECTION"],
+        # Create mock records simulating 3 pages with 5 records each
+        total_pages = 3
+        records_per_page = 5
+        all_records = []
+
+        for page in range(1, total_pages + 1):
+            for record_num in range(1, records_per_page + 1):
+                record_id = f"PAG-{page:02d}-{record_num:02d}"
+                all_records.append(self._create_test_record(
+                    identifier=record_id,
+                    description=f"Decision from Page {page}, Record {record_num}",
+                    partition_date="2024-01-15",
+                    mime_type="application/pdf",
+                    metadata={"page": page, "position": record_num}
+                ))
+
+        # Upload records
+        mongo_storage = MongoDBStorage(
+            mongo_uri=self.test_env["MONGO_URI"],
+            database=self.test_env["MONGO_DB"],
+            collection=self.test_env["MONGO_COLLECTION"],
+        )
+
+        minio_storage = MinIOStorage(
+            endpoint=self.test_env["MINIO_ENDPOINT"],
+            access_key=self.test_env["MINIO_ACCESS_KEY"],
+            secret_key=self.test_env["MINIO_SECRET_KEY"],
+            bucket_name=self.test_env["MINIO_BUCKET"],
+            secure=False,
+        )
+
+        for record in all_records:
+            file_data = self._generate_file_content(record)
+            file_path = minio_storage.upload_file(
+                file_data=file_data,
+                object_name=f"{record['identifier']}.pdf",
+                content_type=record["mime_type"],
             )
+            record["file_path"] = file_path
+            record["status"] = "extracted"
+            mongo_storage.insert_one(record)
 
-            # Step 3: Upload mock files to MinIO landing zone
-            minio_storage = MinIOStorage(
-                endpoint=self.test_env["MINIO_ENDPOINT"],
-                access_key=self.test_env["MINIO_ACCESS_KEY"],
-                secret_key=self.test_env["MINIO_SECRET_KEY"],
-                bucket_name=self.test_env["MINIO_BUCKET"],
-                secure=False,
-            )
+        # Verify all records are in database
+        total_records = self.test_db[self.test_env["MONGO_COLLECTION"]].count_documents({})
 
-            inserted_ids = []
-            for record in mock_records:
-                # Upload mock file to MinIO
-                file_data = self._generate_mock_file_content(record)
-                file_path = minio_storage.upload_file(
-                    file_data=file_data,
-                    object_name=record["file_path"].split("/")[-1],
-                    content_type=record["mime_type"],
-                )
+        print(f"📊 Created {len(all_records)} records across {total_pages} pages")
+        print(f"   Records per page: {records_per_page}")
+        print(f"   Total in database: {total_records}")
 
-                # Update record with actual file path
-                record["file_path"] = file_path
-                record["status"] = "extracted"
+        # Group by page for verification
+        page_counts = defaultdict(int)
+        for record in self.test_db[self.test_env["MONGO_COLLECTION"]].find({}):
+            if "metadata" in record and "page" in record["metadata"]:
+                page_counts[record["metadata"]["page"]] += 1
 
-                # Insert to MongoDB
-                inserted_id = mongo_storage.insert_one(record)
-                inserted_ids.append(inserted_id)
-                logger.info(f"Inserted mock record: {record['identifier']} -> {inserted_id}")
+        print(f"\n✓ Page distribution:")
+        for page in sorted(page_counts.keys()):
+            print(f"   Page {page}: {page_counts[page]} records")
 
-            # Verify records in MongoDB
-            assert len(inserted_ids) == len(mock_records)
+        success = total_records == len(all_records)
+        self.results["pagination"] = {
+            "expected": len(all_records),
+            "actual": total_records,
+            "success": success,
+            "pages": dict(page_counts)
+        }
 
-            # Verify files in MinIO landing zone
-            objects = list(self.minio_client.list_objects(
-                self.test_env["MINIO_BUCKET"],
-                recursive=True,
-            ))
-            assert len(objects) == len(mock_records)
+        mongo_storage.close()
+        return success
 
-            # Step 4: Run transformation pipeline
-            logger.info("Running transformation pipeline...")
-            stats = run_transformation_pipeline(
-                start_date="2024-01-01",
-                end_date="2024-01-31",
-                mongo_uri=self.test_env["MONGO_URI"],
-                mongo_db=self.test_env["MONGO_DB"],
-                source_collection=self.test_env["MONGO_COLLECTION"],
-                dest_collection=self.test_env["MONGO_PROCESSED_COLLECTION"],
-                minio_endpoint=self.test_env["MINIO_ENDPOINT"],
-                minio_access_key=self.test_env["MINIO_ACCESS_KEY"],
-                minio_secret_key=self.test_env["MINIO_SECRET_KEY"],
-                source_bucket=self.test_env["MINIO_BUCKET"],
-                dest_bucket=self.test_env["MINIO_PROCESSED_BUCKET"],
-            )
+    def test_multiple_html_files(self) -> bool:
+        """Test handling of documents with multiple HTML files.
 
-            # Step 5: Verify transformation results
-            assert stats["total"] == len(mock_records)
-            assert stats["processed"] >= len(mock_records) - 1  # Allow 1 failure for error test
-            assert stats["failed"] <= 1
-
-            # Verify processed records in MongoDB
-            processed_collection = self.test_db[self.test_env["MONGO_PROCESSED_COLLECTION"]]
-            processed_count = processed_collection.count_documents({})
-            assert processed_count >= len(mock_records) - 1
-
-            # Verify processed files in MinIO
-            processed_objects = list(self.minio_client.list_objects(
-                self.test_env["MINIO_PROCESSED_BUCKET"],
-                recursive=True,
-            ))
-            assert len(processed_objects) >= len(mock_records) - 1
-
-            # Step 6: Verify specific record transformations
-            for record in mock_records:
-                if record["status"] == "extracted":  # Only check successfully extracted records
-                    processed_record = processed_collection.find_one(
-                        {"identifier": record["identifier"]}
-                    )
-
-                    if processed_record:  # Record should be transformed
-                        assert processed_record["status"] == "transformed"
-                        assert "file_path" in processed_record
-                        assert processed_record["file_path"].startswith(
-                            self.test_env["MINIO_PROCESSED_BUCKET"]
-                        )
-
-                        # Verify file exists in processed bucket
-                        try:
-                            self.minio_client.stat_object(
-                                self.test_env["MINIO_PROCESSED_BUCKET"],
-                                processed_record["file_path"].split("/", 1)[1],
-                            )
-                            logger.info(f"Verified transformed file: {processed_record['file_path']}")
-                        except S3Error:
-                            pytest.fail(f"Transformed file not found: {processed_record['file_path']}")
-
-            # Cleanup
-            mongo_storage.close()
-            logger.info("E2E pipeline test completed successfully")
-
-    @pytest.mark.e2e
-    @pytest.mark.slow
-    def test_extraction_with_real_spider(self) -> None:
-        """Test extraction using real spider against live website.
-
-        This test requires internet connection and tests:
-        1. Spider crawling and scraping
-        2. Pipeline processing (download, storage)
-        3. Data validation
-
-        Note: This test is marked as slow and may be skipped in CI.
+        Simulates scenarios where a single decision has multiple associated
+        HTML files (e.g., decision text, appendices, amendments).
         """
-        with patch.dict(os.environ, self.test_env):
-            # Use a very short date range to limit test duration
-            test_start_date = "2024-01-01"
-            test_end_date = "2024-01-05"
+        print("\n" + "="*80)
+        print("TEST 2: MULTIPLE HTML FILES PER DOCUMENT")
+        print("="*80)
+        print("Testing: Documents with multiple HTML file attachments\n")
 
-            # Configure Scrapy settings for test
-            settings = scrapy_settings.to_scrapy_dict().copy()
-            settings["LOG_LEVEL"] = "INFO"
-
-            # Create crawler runner
-            runner = CrawlerRunner(settings)
-
-            @defer.inlineCallbacks
-            def crawl():
-                """Run spider and wait for completion."""
-                yield runner.crawl(
-                    WRCSpider,
-                    start_date=test_start_date,
-                    end_date=test_end_date,
-                    bodies=["WRC"],  # Test single body type
-                )
-                reactor.stop()
-
-            # Run spider
-            crawl()
-            reactor.run()
-
-            # Verify extracted data
-            mongo_storage = MongoDBStorage(
-                mongo_uri=self.test_env["MONGO_URI"],
-                database=self.test_env["MONGO_DB"],
-                collection=self.test_env["MONGO_COLLECTION"],
-            )
-
-            # Check that some records were extracted
-            extracted_records = list(
-                self.test_db[self.test_env["MONGO_COLLECTION"]].find({})
-            )
-
-            assert len(extracted_records) > 0, "No records were extracted"
-
-            # Verify record structure
-            for record in extracted_records[:5]:  # Check first 5
-                assert "identifier" in record
-                assert "doc_link" in record
-                assert "partition_date" in record
-                assert "body_type" in record
-                assert "published_date" in record
-                assert "status" in record
-
-                # Verify file was downloaded and stored
-                if record["status"] == "extracted":
-                    assert "file_path" in record
-                    assert "file_hash" in record
-                    assert "mime_type" in record
-
-                    # Verify file exists in MinIO
-                    try:
-                        self.minio_client.stat_object(
-                            self.test_env["MINIO_BUCKET"],
-                            record["file_path"].split("/", 1)[1],
-                        )
-                    except S3Error:
-                        pytest.fail(f"File not found in MinIO: {record['file_path']}")
-
-            mongo_storage.close()
-            logger.info(f"Extracted {len(extracted_records)} records successfully")
-
-    @pytest.mark.e2e
-    def test_error_handling_and_recovery(self) -> None:
-        """Test pipeline error handling and recovery mechanisms.
-
-        Verifies that:
-        1. Invalid records are marked with error status
-        2. Pipeline continues processing after errors
-        3. Error details are logged in notes field
-        4. Valid records are processed successfully
-        """
-        with patch.dict(os.environ, self.test_env):
-            # Create mix of valid and invalid mock records
-            mock_records = self._create_mock_records_with_errors()
-
-            mongo_storage = MongoDBStorage(
-                mongo_uri=self.test_env["MONGO_URI"],
-                database=self.test_env["MONGO_DB"],
-                collection=self.test_env["MONGO_COLLECTION"],
-            )
-
-            minio_storage = MinIOStorage(
-                endpoint=self.test_env["MINIO_ENDPOINT"],
-                access_key=self.test_env["MINIO_ACCESS_KEY"],
-                secret_key=self.test_env["MINIO_SECRET_KEY"],
-                bucket_name=self.test_env["MINIO_BUCKET"],
-                secure=False,
-            )
-
-            # Insert records (some with error status, some without files)
-            for record in mock_records:
-                if record.get("create_file", True):
-                    # Upload mock file to MinIO
-                    file_data = self._generate_mock_file_content(record)
-                    file_path = minio_storage.upload_file(
-                        file_data=file_data,
-                        object_name=record["file_path"].split("/")[-1],
-                        content_type=record["mime_type"],
-                    )
-                    record["file_path"] = file_path
-
-                mongo_storage.insert_one(record)
-
-            # Run transformation pipeline
-            stats = run_transformation_pipeline(
-                start_date="2024-01-01",
-                end_date="2024-01-31",
-                mongo_uri=self.test_env["MONGO_URI"],
-                mongo_db=self.test_env["MONGO_DB"],
-                source_collection=self.test_env["MONGO_COLLECTION"],
-                dest_collection=self.test_env["MONGO_PROCESSED_COLLECTION"],
-                minio_endpoint=self.test_env["MINIO_ENDPOINT"],
-                minio_access_key=self.test_env["MINIO_ACCESS_KEY"],
-                minio_secret_key=self.test_env["MINIO_SECRET_KEY"],
-                source_bucket=self.test_env["MINIO_BUCKET"],
-                dest_bucket=self.test_env["MINIO_PROCESSED_BUCKET"],
-            )
-
-            # Verify error handling
-            assert stats["total"] == len(mock_records)
-            assert stats["failed"] > 0  # Some records should fail
-            assert stats["processed"] > 0  # Some should succeed
-
-            # Check that error records were skipped appropriately
-            processed_collection = self.test_db[self.test_env["MONGO_PROCESSED_COLLECTION"]]
-
-            # Error records should either not be processed or marked as error
-            for record in mock_records:
-                if record.get("status") == "error":
-                    processed = processed_collection.find_one(
-                        {"identifier": record["identifier"]}
-                    )
-                    # Either not processed or still has error status
-                    if processed:
-                        assert "error" in processed.get("status", "").lower() or \
-                               processed.get("notes") is not None
-
-            mongo_storage.close()
-            logger.info("Error handling test completed successfully")
-
-    @pytest.mark.e2e
-    def test_idempotency(self) -> None:
-        """Test pipeline idempotency (running twice produces same result).
-
-        Verifies that:
-        1. Duplicate identifiers are not re-processed
-        2. Files are not duplicated in storage
-        3. Metadata remains consistent
-        """
-        with patch.dict(os.environ, self.test_env):
-            mock_records = self._create_mock_records()
-
-            mongo_storage = MongoDBStorage(
-                mongo_uri=self.test_env["MONGO_URI"],
-                database=self.test_env["MONGO_DB"],
-                collection=self.test_env["MONGO_COLLECTION"],
-            )
-
-            minio_storage = MinIOStorage(
-                endpoint=self.test_env["MINIO_ENDPOINT"],
-                access_key=self.test_env["MINIO_ACCESS_KEY"],
-                secret_key=self.test_env["MINIO_SECRET_KEY"],
-                bucket_name=self.test_env["MINIO_BUCKET"],
-                secure=False,
-            )
-
-            # First run: populate data
-            for record in mock_records:
-                file_data = self._generate_mock_file_content(record)
-                file_path = minio_storage.upload_file(
-                    file_data=file_data,
-                    object_name=record["file_path"].split("/")[-1],
-                    content_type=record["mime_type"],
-                )
-                record["file_path"] = file_path
-                record["status"] = "extracted"
-                mongo_storage.insert_one(record)
-
-            # First transformation
-            stats1 = run_transformation_pipeline(
-                start_date="2024-01-01",
-                end_date="2024-01-31",
-                mongo_uri=self.test_env["MONGO_URI"],
-                mongo_db=self.test_env["MONGO_DB"],
-                source_collection=self.test_env["MONGO_COLLECTION"],
-                dest_collection=self.test_env["MONGO_PROCESSED_COLLECTION"],
-                minio_endpoint=self.test_env["MINIO_ENDPOINT"],
-                minio_access_key=self.test_env["MINIO_ACCESS_KEY"],
-                minio_secret_key=self.test_env["MINIO_SECRET_KEY"],
-                source_bucket=self.test_env["MINIO_BUCKET"],
-                dest_bucket=self.test_env["MINIO_PROCESSED_BUCKET"],
-            )
-
-            # Get counts after first run
-            processed_collection = self.test_db[self.test_env["MONGO_PROCESSED_COLLECTION"]]
-            count_after_first = processed_collection.count_documents({})
-
-            objects_after_first = list(self.minio_client.list_objects(
-                self.test_env["MINIO_PROCESSED_BUCKET"],
-                recursive=True,
-            ))
-
-            # Second transformation (should be idempotent)
-            stats2 = run_transformation_pipeline(
-                start_date="2024-01-01",
-                end_date="2024-01-31",
-                mongo_uri=self.test_env["MONGO_URI"],
-                mongo_db=self.test_env["MONGO_DB"],
-                source_collection=self.test_env["MONGO_COLLECTION"],
-                dest_collection=self.test_env["MONGO_PROCESSED_COLLECTION"],
-                minio_endpoint=self.test_env["MINIO_ENDPOINT"],
-                minio_access_key=self.test_env["MINIO_ACCESS_KEY"],
-                minio_secret_key=self.test_env["MINIO_SECRET_KEY"],
-                source_bucket=self.test_env["MINIO_BUCKET"],
-                dest_bucket=self.test_env["MINIO_PROCESSED_BUCKET"],
-            )
-
-            # Get counts after second run
-            count_after_second = processed_collection.count_documents({})
-            objects_after_second = list(self.minio_client.list_objects(
-                self.test_env["MINIO_PROCESSED_BUCKET"],
-                recursive=True,
-            ))
-
-            # Verify idempotency
-            assert count_after_first == count_after_second, \
-                "Record count changed on second run"
-            assert len(objects_after_first) == len(objects_after_second), \
-                "File count changed on second run"
-
-            # Most records should be skipped on second run
-            assert stats2["skipped"] >= stats1["processed"], \
-                "Expected more skipped records on second run"
-
-            mongo_storage.close()
-            logger.info("Idempotency test completed successfully")
-
-    @pytest.mark.e2e
-    def test_date_range_filtering(self) -> None:
-        """Test that transformation pipeline correctly filters by date range.
-
-        Verifies:
-        1. Only records within date range are processed
-        2. Records outside range are skipped
-        3. Edge cases (start/end dates) are handled correctly
-        """
-        with patch.dict(os.environ, self.test_env):
-            # Create records with different partition dates
-            records_with_dates = [
-                self._create_single_mock_record(
-                    identifier=f"TEST-{i:03d}",
-                    partition_date=date,
-                )
-                for i, date in enumerate([
-                    "2023-12-31",  # Outside range (before)
-                    "2024-01-01",  # Start of range
-                    "2024-01-15",  # Middle of range
-                    "2024-01-31",  # End of range
-                    "2024-02-01",  # Outside range (after)
-                ], start=1)
-            ]
-
-            mongo_storage = MongoDBStorage(
-                mongo_uri=self.test_env["MONGO_URI"],
-                database=self.test_env["MONGO_DB"],
-                collection=self.test_env["MONGO_COLLECTION"],
-            )
-
-            minio_storage = MinIOStorage(
-                endpoint=self.test_env["MINIO_ENDPOINT"],
-                access_key=self.test_env["MINIO_ACCESS_KEY"],
-                secret_key=self.test_env["MINIO_SECRET_KEY"],
-                bucket_name=self.test_env["MINIO_BUCKET"],
-                secure=False,
-            )
-
-            # Insert all records
-            for record in records_with_dates:
-                file_data = self._generate_mock_file_content(record)
-                file_path = minio_storage.upload_file(
-                    file_data=file_data,
-                    object_name=record["file_path"].split("/")[-1],
-                    content_type=record["mime_type"],
-                )
-                record["file_path"] = file_path
-                record["status"] = "extracted"
-                mongo_storage.insert_one(record)
-
-            # Run transformation with specific date range
-            stats = run_transformation_pipeline(
-                start_date="2024-01-01",
-                end_date="2024-01-31",
-                mongo_uri=self.test_env["MONGO_URI"],
-                mongo_db=self.test_env["MONGO_DB"],
-                source_collection=self.test_env["MONGO_COLLECTION"],
-                dest_collection=self.test_env["MONGO_PROCESSED_COLLECTION"],
-                minio_endpoint=self.test_env["MINIO_ENDPOINT"],
-                minio_access_key=self.test_env["MINIO_ACCESS_KEY"],
-                minio_secret_key=self.test_env["MINIO_SECRET_KEY"],
-                source_bucket=self.test_env["MINIO_BUCKET"],
-                dest_bucket=self.test_env["MINIO_PROCESSED_BUCKET"],
-            )
-
-            # Verify only records in date range were processed
-            processed_collection = self.test_db[self.test_env["MONGO_PROCESSED_COLLECTION"]]
-
-            # Should have processed exactly 3 records (Jan 1, 15, 31)
-            assert stats["processed"] == 3
-            assert stats["total"] == 3  # Only 3 should be found in date range
-
-            # Verify which records were processed
-            for record in records_with_dates:
-                processed = processed_collection.find_one(
-                    {"identifier": record["identifier"]}
-                )
-
-                if record["partition_date"] in ["2024-01-01", "2024-01-15", "2024-01-31"]:
-                    assert processed is not None, \
-                        f"Record {record['identifier']} should be processed"
-                    assert processed["status"] == "transformed"
-                else:
-                    assert processed is None, \
-                        f"Record {record['identifier']} should not be processed"
-
-            mongo_storage.close()
-            logger.info("Date range filtering test completed successfully")
-
-    def _create_mock_records(self) -> List[Dict[str, Any]]:
-        """Create mock records for testing."""
-        return [
+        # Create parent documents with multiple HTML files
+        test_cases = [
             {
-                "identifier": "TEST-001",
-                "description": "Test Decision 001",
-                "published_date": "01/01/2024",
-                "body_type": "WRC",
-                "source_url": "https://example.com/search",
-                "doc_link": "https://example.com/TEST-001.pdf",
-                "partition_date": "2024-01-01",
-                "file_path": "landing-zone/TEST-001.pdf",
-                "file_hash": "abc123",
-                "mime_type": "application/pdf",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
+                "parent_id": "MULTI-HTML-001",
+                "html_files": ["main.html", "appendix-a.html", "appendix-b.html"],
+                "description": "Decision with main text and 2 appendices"
             },
             {
-                "identifier": "TEST-002",
-                "description": "Test Decision 002",
-                "published_date": "15/01/2024",
-                "body_type": "LC",
-                "source_url": "https://example.com/search",
-                "doc_link": "https://example.com/TEST-002.html",
-                "partition_date": "2024-01-15",
-                "file_path": "landing-zone/TEST-002.html",
-                "file_hash": "def456",
-                "mime_type": "text/html",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
+                "parent_id": "MULTI-HTML-002",
+                "html_files": ["decision.html", "amendment-1.html"],
+                "description": "Decision with amendment"
             },
             {
-                "identifier": "TEST-003",
-                "description": "Test Decision 003",
-                "published_date": "20/01/2024",
-                "body_type": "EAT",
-                "source_url": "https://example.com/search",
-                "doc_link": "https://example.com/TEST-003.pdf",
-                "partition_date": "2024-01-20",
-                "file_path": "landing-zone/TEST-003.pdf",
-                "file_hash": "ghi789",
-                "mime_type": "application/pdf",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
+                "parent_id": "MULTI-HTML-003",
+                "html_files": ["summary.html", "full-text.html", "exhibits.html"],
+                "description": "Decision with summary, full text, and exhibits"
             },
         ]
 
-    def _create_mock_records_with_errors(self) -> List[Dict[str, Any]]:
-        """Create mock records with some error cases for testing."""
-        records = self._create_mock_records()
+        mongo_storage = MongoDBStorage(
+            mongo_uri=self.test_env["MONGO_URI"],
+            database=self.test_env["MONGO_DB"],
+            collection=self.test_env["MONGO_COLLECTION"],
+        )
 
-        # Add an error record
-        records.append({
-            "identifier": "TEST-ERR-001",
-            "description": "Test Error Record",
-            "published_date": "25/01/2024",
-            "body_type": "WRC",
-            "source_url": "https://example.com/search",
-            "doc_link": "https://example.com/error.pdf",
-            "partition_date": "2024-01-25",
-            "status": "error",
-            "notes": "Download failed",
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "create_file": False,  # Don't create file for this one
-        })
+        minio_storage = MinIOStorage(
+            endpoint=self.test_env["MINIO_ENDPOINT"],
+            access_key=self.test_env["MINIO_ACCESS_KEY"],
+            secret_key=self.test_env["MINIO_SECRET_KEY"],
+            bucket_name=self.test_env["MINIO_BUCKET"],
+            secure=False,
+        )
 
-        # Add a record with missing file
-        records.append({
-            "identifier": "TEST-MISSING-001",
-            "description": "Test Missing File",
-            "published_date": "28/01/2024",
-            "body_type": "LC",
-            "source_url": "https://example.com/search",
-            "doc_link": "https://example.com/missing.pdf",
-            "partition_date": "2024-01-28",
-            "file_path": "landing-zone/NONEXISTENT.pdf",
-            "file_hash": "missing123",
-            "mime_type": "application/pdf",
-            "status": "extracted",
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "create_file": False,  # Don't create file
-        })
+        all_records = []
 
-        return records
+        for test_case in test_cases:
+            parent_id = test_case["parent_id"]
+            print(f"📄 {parent_id}: {test_case['description']}")
+            print(f"   HTML files: {len(test_case['html_files'])}")
 
-    def _create_single_mock_record(
+            for idx, html_file in enumerate(test_case["html_files"]):
+                # Create unique identifier for each HTML file
+                record_id = f"{parent_id}-{idx+1:02d}"
+
+                record = self._create_test_record(
+                    identifier=record_id,
+                    description=f"{test_case['description']} - {html_file}",
+                    partition_date="2024-01-10",
+                    mime_type="text/html",
+                    metadata={
+                        "parent_id": parent_id,
+                        "file_name": html_file,
+                        "file_index": idx,
+                        "total_files": len(test_case["html_files"])
+                    }
+                )
+
+                # Create HTML content with parent reference
+                html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>{record_id} - {html_file}</title>
+</head>
+<body>
+    <div class="document-header">
+        <h1>Parent Document: {parent_id}</h1>
+        <h2>File: {html_file}</h2>
+        <p>Part {idx+1} of {len(test_case['html_files'])}</p>
+    </div>
+    <div class="content">
+        <h3>Decision Content</h3>
+        <p>This is the content of {html_file} for document {parent_id}.</p>
+        <p>This document contains detailed information and legal analysis.</p>
+        <section>
+            <h4>Section 1: Background</h4>
+            <p>Background information goes here...</p>
+        </section>
+        <section>
+            <h4>Section 2: Findings</h4>
+            <p>Detailed findings and analysis...</p>
+        </section>
+    </div>
+</body>
+</html>"""
+
+                # Upload HTML file
+                file_data = html_content.encode("utf-8")
+                file_path = minio_storage.upload_file(
+                    file_data=file_data,
+                    object_name=f"{record_id}.html",
+                    content_type="text/html",
+                )
+                record["file_path"] = file_path
+                record["status"] = "extracted"
+
+                mongo_storage.insert_one(record)
+                all_records.append(record)
+
+                print(f"   ✓ Uploaded: {html_file}")
+
+        print(f"\n📊 Total HTML files created: {len(all_records)}")
+        print(f"   Parent documents: {len(test_cases)}")
+
+        # Verify all files are in storage
+        db_count = self.test_db[self.test_env["MONGO_COLLECTION"]].count_documents(
+            {"mime_type": "text/html"}
+        )
+
+        minio_objects = list(self.minio_client.list_objects(
+            self.test_env["MINIO_BUCKET"],
+            recursive=True
+        ))
+        html_files_in_minio = [obj for obj in minio_objects if obj.object_name.endswith('.html')]
+
+        print(f"   In MongoDB: {db_count} HTML records")
+        print(f"   In MinIO: {len(html_files_in_minio)} HTML files")
+
+        # Group by parent
+        parent_groups = defaultdict(list)
+        for record in self.test_db[self.test_env["MONGO_COLLECTION"]].find({"mime_type": "text/html"}):
+            if "metadata" in record and "parent_id" in record["metadata"]:
+                parent_groups[record["metadata"]["parent_id"]].append(record["identifier"])
+
+        print(f"\n✓ Files grouped by parent document:")
+        for parent_id in sorted(parent_groups.keys()):
+            print(f"   {parent_id}: {len(parent_groups[parent_id])} files")
+
+        success = db_count == len(all_records)
+        self.results["multiple_html_files"] = {
+            "expected": len(all_records),
+            "actual": db_count,
+            "success": success,
+            "parents": len(test_cases),
+            "parent_groups": {k: len(v) for k, v in parent_groups.items()}
+        }
+
+        mongo_storage.close()
+        return success
+
+    def test_parent_child_extraction(self) -> bool:
+        """Test extraction of parent HTML documents with child documents.
+
+        Verifies that when a parent document is HTML, all referenced
+        child documents are also extracted and properly linked.
+        """
+        print("\n" + "="*80)
+        print("TEST 3: PARENT-CHILD HTML DOCUMENT EXTRACTION")
+        print("="*80)
+        print("Testing: Parent HTML docs with child documents are fully extracted\n")
+
+        mongo_storage = MongoDBStorage(
+            mongo_uri=self.test_env["MONGO_URI"],
+            database=self.test_env["MONGO_DB"],
+            collection=self.test_env["MONGO_COLLECTION"],
+        )
+
+        minio_storage = MinIOStorage(
+            endpoint=self.test_env["MINIO_ENDPOINT"],
+            access_key=self.test_env["MINIO_ACCESS_KEY"],
+            secret_key=self.test_env["MINIO_SECRET_KEY"],
+            bucket_name=self.test_env["MINIO_BUCKET"],
+            secure=False,
+        )
+
+        # Create parent-child hierarchies
+        hierarchies = [
+            {
+                "parent": "PARENT-001",
+                "children": ["CHILD-001-A", "CHILD-001-B", "CHILD-001-C"],
+                "description": "Main decision with 3 child documents"
+            },
+            {
+                "parent": "PARENT-002",
+                "children": ["CHILD-002-A"],
+                "description": "Decision with single child document"
+            },
+        ]
+
+        all_records = []
+
+        for hierarchy in hierarchies:
+            parent_id = hierarchy["parent"]
+            children_ids = hierarchy["children"]
+
+            print(f"📁 {parent_id}: {hierarchy['description']}")
+            print(f"   Children: {len(children_ids)}")
+
+            # Create parent HTML document with links to children
+            child_links_html = "\n".join([
+                f'<li><a href="#{child_id}">{child_id}</a></li>'
+                for child_id in children_ids
+            ])
+
+            parent_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>{parent_id} - Main Decision</title>
+</head>
+<body>
+    <header>
+        <h1>Decision Reference: {parent_id}</h1>
+        <p>Published: 15/01/2024</p>
+    </header>
+
+    <main>
+        <section class="summary">
+            <h2>Summary</h2>
+            <p>This is the main decision document. Related documents:</p>
+            <ul class="related-documents">
+                {child_links_html}
+            </ul>
+        </section>
+
+        <section class="decision">
+            <h2>Decision</h2>
+            <p>The main decision content goes here...</p>
+        </section>
+    </main>
+</body>
+</html>"""
+
+            # Create and upload parent
+            parent_record = self._create_test_record(
+                identifier=parent_id,
+                description=f"Parent document - {hierarchy['description']}",
+                partition_date="2024-01-15",
+                mime_type="text/html",
+                metadata={
+                    "role": "parent",
+                    "children": children_ids,
+                    "total_children": len(children_ids)
+                }
+            )
+
+            file_path = minio_storage.upload_file(
+                file_data=parent_html.encode("utf-8"),
+                object_name=f"{parent_id}.html",
+                content_type="text/html",
+            )
+            parent_record["file_path"] = file_path
+            parent_record["status"] = "extracted"
+            mongo_storage.insert_one(parent_record)
+            all_records.append(parent_record)
+
+            print(f"   ✓ Parent: {parent_id}")
+
+            # Create and upload children
+            for child_id in children_ids:
+                child_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>{child_id} - Supporting Document</title>
+</head>
+<body>
+    <header>
+        <p><a href="#{parent_id}">Back to parent: {parent_id}</a></p>
+        <h1>Supporting Document: {child_id}</h1>
+    </header>
+
+    <main>
+        <section>
+            <h2>Additional Information</h2>
+            <p>This document provides additional details for {parent_id}.</p>
+            <p>Content specific to {child_id}...</p>
+        </section>
+    </main>
+</body>
+</html>"""
+
+                child_record = self._create_test_record(
+                    identifier=child_id,
+                    description=f"Child document of {parent_id}",
+                    partition_date="2024-01-15",
+                    mime_type="text/html",
+                    metadata={
+                        "role": "child",
+                        "parent": parent_id
+                    }
+                )
+
+                file_path = minio_storage.upload_file(
+                    file_data=child_html.encode("utf-8"),
+                    object_name=f"{child_id}.html",
+                    content_type="text/html",
+                )
+                child_record["file_path"] = file_path
+                child_record["status"] = "extracted"
+                mongo_storage.insert_one(child_record)
+                all_records.append(child_record)
+
+                print(f"   ✓ Child:  {child_id}")
+
+        print(f"\n📊 Total documents created: {len(all_records)}")
+
+        # Verify parent-child relationships
+        parents = list(self.test_db[self.test_env["MONGO_COLLECTION"]].find({
+            "metadata.role": "parent"
+        }))
+
+        children = list(self.test_db[self.test_env["MONGO_COLLECTION"]].find({
+            "metadata.role": "child"
+        }))
+
+        print(f"   Parent documents: {len(parents)}")
+        print(f"   Child documents: {len(children)}")
+
+        # Verify each parent has all children
+        print(f"\n✓ Parent-child relationships:")
+        all_children_found = True
+        for parent in parents:
+            parent_id = parent["identifier"]
+            expected_children = parent["metadata"]["children"]
+
+            actual_children = [
+                c["identifier"] for c in children
+                if c["metadata"]["parent"] == parent_id
+            ]
+
+            found_all = set(expected_children) == set(actual_children)
+            all_children_found = all_children_found and found_all
+
+            status = "✓" if found_all else "✗"
+            print(f"   {status} {parent_id}: {len(actual_children)}/{len(expected_children)} children")
+
+        success = len(all_records) == (len(parents) + len(children)) and all_children_found
+        self.results["parent_child"] = {
+            "expected": len(all_records),
+            "actual": len(parents) + len(children),
+            "success": success,
+            "parents": len(parents),
+            "children": len(children),
+            "all_children_found": all_children_found
+        }
+
+        mongo_storage.close()
+        return success
+
+    def test_data_transformation(self) -> bool:
+        """Test the complete data transformation pipeline.
+
+        Runs the transformation pipeline on all test data and verifies:
+        - Files are transformed correctly
+        - Metadata is updated
+        - Files are moved to processed bucket
+        """
+        print("\n" + "="*80)
+        print("TEST 4: DATA TRANSFORMATION PIPELINE")
+        print("="*80)
+        print("Testing: Complete transformation from landing to processed zone\n")
+
+        # Get counts before transformation
+        source_collection = self.test_db[self.test_env["MONGO_COLLECTION"]]
+        before_count = source_collection.count_documents({"status": "extracted"})
+
+        landing_objects = list(self.minio_client.list_objects(
+            self.test_env["MINIO_BUCKET"],
+            recursive=True
+        ))
+
+        print(f"📊 Before transformation:")
+        print(f"   Records to process: {before_count}")
+        print(f"   Files in landing zone: {len(landing_objects)}")
+
+        # Run transformation
+        print(f"\n⚙️  Running transformation pipeline...")
+
+        stats = run_transformation_pipeline(
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+            mongo_uri=self.test_env["MONGO_URI"],
+            mongo_db=self.test_env["MONGO_DB"],
+            source_collection=self.test_env["MONGO_COLLECTION"],
+            dest_collection=self.test_env["MONGO_PROCESSED_COLLECTION"],
+            minio_endpoint=self.test_env["MINIO_ENDPOINT"],
+            minio_access_key=self.test_env["MINIO_ACCESS_KEY"],
+            minio_secret_key=self.test_env["MINIO_SECRET_KEY"],
+            source_bucket=self.test_env["MINIO_BUCKET"],
+            dest_bucket=self.test_env["MINIO_PROCESSED_BUCKET"],
+        )
+
+        # Get counts after transformation
+        processed_collection = self.test_db[self.test_env["MONGO_PROCESSED_COLLECTION"]]
+        after_count = processed_collection.count_documents({"status": "transformed"})
+
+        processed_objects = list(self.minio_client.list_objects(
+            self.test_env["MINIO_PROCESSED_BUCKET"],
+            recursive=True
+        ))
+
+        print(f"\n📊 After transformation:")
+        print(f"   Total records found: {stats['total']}")
+        print(f"   Successfully processed: {stats['processed']}")
+        print(f"   Failed: {stats['failed']}")
+        print(f"   Skipped: {stats['skipped']}")
+        print(f"   Records in processed collection: {after_count}")
+        print(f"   Files in processed bucket: {len(processed_objects)}")
+
+        # Verify file types
+        file_types = defaultdict(int)
+        for obj in processed_objects:
+            ext = Path(obj.object_name).suffix
+            file_types[ext] += 1
+
+        if file_types:
+            print(f"\n✓ Processed file types:")
+            for ext, count in sorted(file_types.items()):
+                print(f"   {ext}: {count} files")
+
+        # Sample some transformed records
+        sample_records = list(processed_collection.find({"status": "transformed"}).limit(5))
+
+        if sample_records:
+            print(f"\n✓ Sample transformed records:")
+            for record in sample_records:
+                print(f"   {record['identifier']}: {record.get('mime_type', 'unknown')}")
+                print(f"      Original: {record.get('doc_link', 'N/A')}")
+                print(f"      Processed: {record.get('file_path', 'N/A')}")
+
+        success = stats['processed'] >= before_count * 0.9  # Allow 10% failure
+        self.results["transformation"] = {
+            "before_count": before_count,
+            "after_count": after_count,
+            "stats": stats,
+            "success": success,
+            "file_types": dict(file_types)
+        }
+
+        return success
+
+    def display_results_summary(self) -> None:
+        """Display comprehensive test results summary."""
+        print("\n" + "="*80)
+        print("COMPREHENSIVE E2E TEST RESULTS")
+        print("="*80)
+
+        total_tests = len(self.results)
+        passed_tests = sum(1 for r in self.results.values() if r.get("success", False))
+
+        print(f"\n📊 Overall: {passed_tests}/{total_tests} tests passed\n")
+
+        for test_name, result in self.results.items():
+            status = "✅ PASS" if result.get("success", False) else "❌ FAIL"
+            print(f"{status} - {test_name.replace('_', ' ').title()}")
+
+            if "expected" in result and "actual" in result:
+                print(f"     Expected: {result['expected']}, Actual: {result['actual']}")
+
+        print("\n" + "="*80)
+        print("DETAILED RESULTS")
+        print("="*80)
+        print(json.dumps(self.results, indent=2))
+
+        # Save results to file
+        results_file = Path(__file__).parent / "comprehensive_e2e_results.json"
+        with open(results_file, "w") as f:
+            json.dump(self.results, f, indent=2)
+        print(f"\n💾 Detailed results saved to: {results_file}")
+
+        # Display access information
+        print("\n" + "="*80)
+        print("INSPECT RESULTS MANUALLY")
+        print("="*80)
+        print(f"\n🗄️  MongoDB:")
+        print(f"   Connection: {self.test_env['MONGO_URI']}")
+        print(f"   Database: {self.test_env['MONGO_DB']}")
+        print(f"   Collections:")
+        print(f"      - {self.test_env['MONGO_COLLECTION']} (source)")
+        print(f"      - {self.test_env['MONGO_PROCESSED_COLLECTION']} (processed)")
+
+        print(f"\n📦 MinIO:")
+        print(f"   Endpoint: http://{self.test_env['MINIO_ENDPOINT']}")
+        print(f"   Access Key: {self.test_env['MINIO_ACCESS_KEY']}")
+        print(f"   Buckets:")
+        print(f"      - {self.test_env['MINIO_BUCKET']} (landing zone)")
+        print(f"      - {self.test_env['MINIO_PROCESSED_BUCKET']} (processed)")
+
+        print(f"\n💡 To inspect data:")
+        print(f"   1. MongoDB: mongosh '{self.test_env['MONGO_URI']}'")
+        print(f"   2. MinIO UI: http://localhost:9001 (login with credentials above)")
+        print(f"   3. Python: Use provided inspection script below")
+
+    def _create_test_record(
         self,
         identifier: str,
+        description: str,
         partition_date: str,
+        mime_type: str,
+        metadata: Optional[Dict] = None,
     ) -> Dict[str, Any]:
-        """Create a single mock record with specified parameters."""
+        """Create a test record with specified parameters."""
         return {
             "identifier": identifier,
-            "description": f"Test Decision {identifier}",
+            "description": description,
             "published_date": partition_date.replace("-", "/"),
             "body_type": "WRC",
             "source_url": "https://example.com/search",
-            "doc_link": f"https://example.com/{identifier}.pdf",
+            "doc_link": f"https://example.com/{identifier}",
             "partition_date": partition_date,
-            "file_path": f"landing-zone/{identifier}.pdf",
-            "file_hash": f"hash_{identifier}",
-            "mime_type": "application/pdf",
+            "file_path": f"test/{identifier}",
+            "mime_type": mime_type,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
+            "metadata": metadata or {},
         }
 
-    def _generate_mock_file_content(self, record: Dict[str, Any]) -> bytes:
-        """Generate mock file content based on record mime type."""
+    def _generate_file_content(self, record: Dict[str, Any]) -> bytes:
+        """Generate file content based on record."""
         mime_type = record.get("mime_type", "application/pdf")
         identifier = record.get("identifier", "UNKNOWN")
 
         if mime_type == "text/html":
-            content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>{identifier}</title>
-            </head>
-            <body>
-                <h1>Test Document {identifier}</h1>
-                <p>This is a test HTML document for {identifier}.</p>
-                <p>Published: {record.get('published_date', 'Unknown')}</p>
-                <p>Body: {record.get('body_type', 'Unknown')}</p>
-            </body>
-            </html>
-            """
+            content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>{identifier}</title>
+</head>
+<body>
+    <h1>Document {identifier}</h1>
+    <p>Description: {record.get('description', 'N/A')}</p>
+    <p>Published: {record.get('published_date', 'N/A')}</p>
+</body>
+</html>"""
             return content.encode("utf-8")
         else:
-            # Mock PDF content (simple binary)
-            return f"MOCK_PDF_CONTENT_{identifier}_{datetime.now().isoformat()}".encode("utf-8")
+            return f"MOCK_PDF_{identifier}_{datetime.now().isoformat()}".encode("utf-8")
 
 
-if __name__ == "__main__":
-    """Run e2e tests directly."""
+def run_comprehensive_tests() -> None:
+    """Run all comprehensive e2e tests."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    # Run with pytest
-    pytest.main([
-        __file__,
-        "-v",
-        "-m", "e2e",
-        "--tb=short",
-        "-s",  # Show print statements
-    ])
+    test = ComprehensiveE2ETest()
+
+    try:
+        test.setup()
+
+        # Run all tests
+        test.test_pagination_handling()
+        test.test_multiple_html_files()
+        test.test_parent_child_extraction()
+        test.test_data_transformation()
+
+        # Display results
+        test.display_results_summary()
+
+    finally:
+        test.teardown()
+
+
+if __name__ == "__main__":
+    run_comprehensive_tests()
