@@ -4,17 +4,17 @@ Provides interface for running Scrapy spider with specified date range and body 
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Iterable
 from datetime import datetime, date
 from urllib.parse import urlencode
+from typing import Iterable
 import logging
 
 from bs4 import BeautifulSoup
 import scrapy
 
-from src.utils import partition
-from src.config import wrc_settings
 from src.models import RecordMetadata
+from src.config import wrc_settings
+from src.utils import partition
 
 
 
@@ -63,7 +63,7 @@ class WRCSpider(scrapy.Spider):
         for body in self.bodies:
             body_name = body_mapping.get(body, body)
             for part_date in partition(self.start_date, self.end_date, "monthly"):
-                # Use actual start_date for the first partition, otherwise use partition start
+                # Use actual start_date for first partition
                 period_start = max(part_date, self.start_date)
 
                 # Calculate end of month

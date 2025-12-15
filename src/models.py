@@ -9,17 +9,17 @@ from scrapy import Item, Field
 class RecordMetadata(Item):
     """Scraped metadata for a record"""
 
-    identifier: str = Field()
-    description: Optional[str] = Field()
-    published_date: str = Field()
-    body_type: str = Field()
-    source_url: str = Field()
-    doc_link: str = Field()
-    partition_date: str = Field()
-    file_path: Optional[str] = Field()
-    file_hash: Optional[str] = Field()
-    mime_type: Optional[str] = Field() # whether the doc link points to a pdf/html/doc etc
-    status: str = Field() # extracted|error - set when saving record and its docs to MongoDB
-    created_at: str = Field()
-    updated_at: str = Field()
-    notes: Optional[str] = Field()
+    identifier = Field()
+    description = Field()
+    published_date = Field()
+    body_type = Field()
+    source_url = Field()
+    doc_link = Field()
+    partition_date = Field()
+    file_path = Field()
+    file_hash = Field()
+    mime_type = Field() # whether the doc link points to a pdf/html/doc etc
+    status = Field() # extracted|transformed|error
+    created_at = Field()
+    updated_at = Field()
+    notes = Field()
