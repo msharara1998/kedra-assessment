@@ -28,7 +28,7 @@ import pytest
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.extraction import WRCSpider
+from src.ingest import WRCSpider
 from src.transform import run_transformation_pipeline
 from src.storage import MongoDBStorage, MinIOStorage
 from src.config import mongodb_settings, minio_settings

@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from scrapy.crawler import CrawlerProcess
 
 from src.config import scrapy_settings, mongodb_settings, minio_settings
-from src.extraction import WRCSpider
+from src.ingest import WRCSpider, run_ingestion_pipeline
 from src.transform import run_transformation_pipeline
 
 # Load environment variables
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 def run_ingestion(args):
-    """Run the ingestion process (Scrapy spider)."""
+    """Run the complete ingestion pipeline."""
     logger.info("Starting ingestion process")
     logger.info("Date range: %s to %s", args.start_date, args.end_date)
 
@@ -42,35 +42,41 @@ def run_ingestion(args):
     else:
         logger.info("Bodies: All (default)")
 
-    # Configure Scrapy settings
-    settings = scrapy_settings.to_scrapy_dict()
+    try:
+        # Configure Scrapy settings
+        settings = scrapy_settings.to_scrapy_dict()
 
-    # If output file is specified
-    if args.output:
-        settings["FEEDS"] = {
-            args.output: {
-                "format": "json",
-                "encoding": "utf8",
-                "store_empty": False,
-                "indent": 2,
+        # If output file is specified, add JSON export feed
+        if args.output:
+            settings["FEEDS"] = {
+                args.output: {
+                    "format": "json",
+                    "encoding": "utf8",
+                    "store_empty": False,
+                    "indent": 2,
+                }
             }
-        }
 
-    # Create crawler process
-    process = CrawlerProcess(settings=settings)
+        # Run ingestion pipeline (scraping + file downloads + MongoDB/MinIO storage)
+        stats = run_ingestion_pipeline(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            bodies=bodies,
+            mongo_uri=mongodb_settings.uri,
+            mongo_db=mongodb_settings.database,
+            mongo_collection=mongodb_settings.collection,
+            minio_endpoint=minio_settings.endpoint,
+            minio_access_key=minio_settings.access_key,
+            minio_secret_key=minio_settings.secret_key,
+            minio_bucket=minio_settings.bucket,
+            scrapy_settings=settings,
+        )
 
-    # Add spider to crawler
-    process.crawl(
-        WRCSpider,
-        start_date=args.start_date,
-        end_date=args.end_date,
-        bodies=bodies,
-    )
+        logger.info("Ingestion statistics: %s", stats)
 
-    # Start crawling (blocking call)
-    logger.info("Starting crawler...")
-    process.start()
-    logger.info("Ingestion completed")
+    except Exception as e:
+        logger.error("Ingestion failed: %s", e, exc_info=True)
+        sys.exit(1)
 
 
 def run_transformation(args):

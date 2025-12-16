@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from scrapy.crawler import CrawlerProcess
 
 from src.config import scrapy_settings
-from src.extraction import WRCSpider
+from src.ingest import WRCSpider
 
 # Load environment variables
 load_dotenv()
