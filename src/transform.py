@@ -47,11 +47,11 @@ def get_file_extension(mime_type: str) -> str:
         "text/htm": ".html",
         "text/plain": ".txt",
     }
-    
+
     # Normalize mime type (remove charset and other parameters)
     if ";" in mime_type:
         mime_type = mime_type.split(";")[0].strip()
-    
+
     return mime_to_ext.get(mime_type.lower(), ".bin")
 
 
@@ -71,10 +71,10 @@ def validate_date_range(start_date: str, end_date: str) -> bool:
     try:
         start = datetime.fromisoformat(start_date)
         end = datetime.fromisoformat(end_date)
-        
+
         if end < start:
             raise ValueError(f"End date ({end_date}) must be greater than or equal to start date ({start_date})")
-        
+
         return True
     except ValueError as e:
         if "does not match format" in str(e) or "Invalid isoformat string" in str(e):
@@ -84,7 +84,7 @@ def validate_date_range(start_date: str, end_date: str) -> bool:
 
 class HTMLContentExtractor:
     """Extract relevant content from HTML files using BeautifulSoup.
-    
+
     Removes navigation elements, headers, footers, and extracts main content.
     """
 
@@ -103,21 +103,21 @@ class HTMLContentExtractor:
         """
         try:
             soup = BeautifulSoup(html_content, "html.parser")
-            
+
             # Remove unwanted elements
             self._remove_unwanted_elements(soup)
-            
+
             # Extract main content
             cleaned_html = self._extract_main_content(soup)
-            
+
             logger.debug(
                 "HTML content extracted: original=%d cleaned=%d",
                 len(html_content),
                 len(cleaned_html),
             )
-            
+
             return cleaned_html
-            
+
         except Exception as e:
             logger.error("Error extracting HTML content: %s", e)
             raise
@@ -138,11 +138,11 @@ class HTMLContentExtractor:
             "noscript",
             "iframe",
         ]
-        
+
         for tag in unwanted_tags:
             for element in soup.find_all(tag):
                 element.decompose()
-        
+
         # Remove elements with common navigation/sidebar classes
         unwanted_classes = [
             "navigation",
@@ -159,15 +159,15 @@ class HTMLContentExtractor:
             "related-posts",
             "comments",
         ]
-        
+
         for class_name in unwanted_classes:
             for element in soup.find_all(class_=lambda x: isinstance(x, str) and class_name in x.lower()):
                 element.decompose()
-        
+
         # Remove button elements
         for button in soup.find_all("button"):
             button.decompose()
-        
+
         # Remove elements with role="navigation"
         for element in soup.find_all(attrs={"role": "navigation"}):
             element.decompose()
@@ -193,23 +193,23 @@ class HTMLContentExtractor:
             ("div", "entry-content"),
             ("section", "content"),
         ]
-        
+
         for tag, class_name in content_selectors:
             if class_name:
                 element = soup.find(tag, class_=lambda x: isinstance(x, str) and class_name in x.lower())
             else:
                 element = soup.find(tag)
-            
+
             if element:
                 logger.debug("Main content found in <%s> tag", tag)
                 return str(element)
-        
+
         # If no main content container found, return body or full soup
         body = soup.find("body")
         if body:
             logger.debug("Main content not found, using <body>")
             return str(body)
-        
+
         logger.debug("Main content not found, using full document")
         return str(soup)
 
@@ -241,9 +241,9 @@ class FileProcessor:
         # Normalize mime type
         if ";" in mime_type:
             mime_type = mime_type.split(";")[0].strip()
-        
+
         mime_type = mime_type.lower()
-        
+
         # Route to appropriate handler
         if mime_type in ["text/html", "text/htm"]:
             return self._process_html(file_data, identifier, mime_type)
@@ -276,29 +276,29 @@ class FileProcessor:
         try:
             # Decode HTML
             html_string = html_data.decode("utf-8", errors="ignore")
-            
+
             # Extract main content
             cleaned_html = self.html_extractor.extract_content(html_string)
-            
+
             # Convert back to bytes
             processed_data = cleaned_html.encode("utf-8")
-            
+
             # Calculate new hash
             new_hash = calculate_file_hash(processed_data)
-            
+
             # Generate new filename
             extension = get_file_extension(mime_type)
             new_filename = f"{identifier}{extension}"
-            
+
             logger.info(
                 "HTML processed: identifier=%s original_size=%d processed_size=%d",
                 identifier,
                 len(html_data),
                 len(processed_data),
             )
-            
+
             return processed_data, new_hash, new_filename
-            
+
         except Exception as e:
             logger.error("Error processing HTML for %s: %s", identifier, e)
             raise
@@ -321,27 +321,27 @@ class FileProcessor:
         """
         # No transformation for documents
         processed_data = doc_data
-        
+
         # Calculate hash (unchanged)
         new_hash = calculate_file_hash(processed_data)
-        
+
         # Generate new filename
         extension = get_file_extension(mime_type)
         new_filename = f"{identifier}{extension}"
-        
+
         logger.info(
             "Document processed (no transformation): identifier=%s size=%d type=%s",
             identifier,
             len(doc_data),
             mime_type,
         )
-        
+
         return processed_data, new_hash, new_filename
 
 
 class TransformationPipeline:
     """Main transformation pipeline orchestrator.
-    
+
     Fetches records from MongoDB, processes files from landing zone,
     and stores results in processed bucket and collection.
     """
@@ -384,7 +384,7 @@ class TransformationPipeline:
             database=mongo_db,
             collection=dest_collection,
         )
-        
+
         # Initialize MinIO connections
         self.source_storage = MinIOStorage(
             endpoint=minio_endpoint,
@@ -400,10 +400,10 @@ class TransformationPipeline:
             bucket_name=dest_bucket,
             secure=secure,
         )
-        
+
         # Initialize file processor
         self.file_processor = FileProcessor()
-        
+
         logger.info(
             "TransformationPipeline initialized: source=%s/%s dest=%s/%s",
             source_bucket,
@@ -432,13 +432,13 @@ class TransformationPipeline:
         """
         # Validate date range
         validate_date_range(start_date, end_date)
-        
+
         logger.info(
             "Starting transformation pipeline: start_date=%s end_date=%s",
             start_date,
             end_date,
         )
-        
+
         # Initialize statistics
         stats = {
             "total": 0,
@@ -446,25 +446,25 @@ class TransformationPipeline:
             "failed": 0,
             "skipped": 0,
         }
-        
+
         # Fetch records from source collection
         records = self.source_db.find_by_date_range(
             start_date=start_date,
             end_date=end_date,
             status="extracted",
         )
-        
+
         stats["total"] = len(records)
         logger.info("Fetched %d records from source collection", stats["total"])
-        
+
         # Process each record
         for idx, record in enumerate(records, 1):
             identifier = record.get("identifier", "unknown")
-            
+
             try:
                 # Process record
                 processed_record = self._process_record(record)
-                
+
                 if processed_record:
                     stats["processed"] += 1
                     logger.debug(
@@ -476,7 +476,7 @@ class TransformationPipeline:
                 else:
                     stats["skipped"] += 1
                     logger.warning("Skipped record %d/%d: %s", idx, stats["total"], identifier)
-                
+
                 # Log progress every 10 records
                 if idx % 10 == 0:
                     logger.info(
@@ -485,7 +485,7 @@ class TransformationPipeline:
                         stats["total"],
                         (idx / stats["total"]) * 100,
                     )
-                    
+
             except Exception as e:
                 stats["failed"] += 1
                 logger.error(
@@ -495,12 +495,12 @@ class TransformationPipeline:
                     identifier,
                     e,
                 )
-        
+
         logger.info(
             "Transformation pipeline completed: %s",
             stats,
         )
-        
+
         return stats
 
     def _process_record(self, record: Dict) -> Optional[Dict]:
@@ -515,7 +515,7 @@ class TransformationPipeline:
         identifier = record.get("identifier")
         file_path = record.get("file_path")
         mime_type = record.get("mime_type")
-        
+
         # Validate required fields
         if not all([identifier, file_path, mime_type]):
             logger.warning(
@@ -525,33 +525,33 @@ class TransformationPipeline:
                 mime_type,
             )
             return None
-        
+
         # Type assertions after validation
         assert isinstance(identifier, str)
         assert isinstance(file_path, str)
         assert isinstance(mime_type, str)
-        
+
         try:
             # Extract object name from file_path (format: bucket/object_name)
             object_name = file_path.split("/", 1)[1] if "/" in file_path else file_path
-            
+
             # Download file from source bucket
             file_data = self.source_storage.download_file(object_name)
-            
+
             # Process file based on type
             processed_data, new_hash, new_filename = self.file_processor.process_file(
                 file_data=file_data,
                 mime_type=mime_type,
                 identifier=identifier,
             )
-            
+
             # Upload to destination bucket
             new_file_path = self.dest_storage.upload_file(
                 file_data=processed_data,
                 object_name=new_filename,
                 content_type=mime_type,
             )
-            
+
             # Create new metadata record
             processed_record = {
                 **record,  # Copy all original fields
@@ -561,21 +561,21 @@ class TransformationPipeline:
                 "transformation_date": datetime.now().isoformat(),
                 "status": "transformed",
             }
-            
+
             # Remove MongoDB _id field if present
             processed_record.pop("_id", None)
-            
+
             # Insert into destination collection
             self.dest_db.insert_one(processed_record)
-            
+
             logger.info(
                 "Record processed successfully: identifier=%s new_path=%s",
                 identifier,
                 new_filename,
             )
-            
+
             return processed_record
-            
+
         except Exception as e:
             logger.error("Error processing record %s: %s", identifier, e)
             raise
@@ -629,7 +629,7 @@ def run_transformation_pipeline(
         source_bucket=source_bucket,
         dest_bucket=dest_bucket,
     )
-    
+
     try:
         stats = pipeline.transform(start_date=start_date, end_date=end_date)
         return stats

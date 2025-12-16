@@ -35,7 +35,7 @@ def run_ingestion(args):
     """Run the ingestion process (Scrapy spider)."""
     logger.info("Starting ingestion process")
     logger.info("Date range: %s to %s", args.start_date, args.end_date)
-    
+
     bodies = args.bodies.split(",") if args.bodies else None
     if bodies:
         logger.info("Bodies: %s", ", ".join(bodies))
@@ -43,8 +43,8 @@ def run_ingestion(args):
         logger.info("Bodies: All (default)")
 
     # Configure Scrapy settings
-    settings = scrapy_settings.to_scrapy_dict().copy()
-    
+    settings = scrapy_settings.to_scrapy_dict()
+
     # If output file is specified
     if args.output:
         settings["FEEDS"] = {
@@ -92,13 +92,13 @@ def run_transformation(args):
             source_bucket=minio_settings.bucket,
             dest_bucket=minio_settings.processed_bucket,
         )
-        
+
         logger.info("Transformation statistics: %s", stats)
-        
+
         if stats["failed"] > 0:
             logger.warning("Some records failed to process.")
             sys.exit(1)
-            
+
     except Exception as e:
         logger.error("Transformation failed: %s", e, exc_info=True)
         sys.exit(1)
