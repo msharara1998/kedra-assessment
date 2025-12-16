@@ -163,7 +163,7 @@ python -m src.main transform --start-date 2024-01-01 --end-date 2024-01-31
 kedra-assessment/
 ├── src/
 │   ├── __init__.py
-│   ├── config.py           # Configuration with Pydantic
+│   ├── config.py           # Project-wide Configuration with Pydantic
 │   ├── extraction.py       # Spider + ingestion pipeline
 │   ├── main.py            # CLI entry point
 │   ├── models.py          # Data models
